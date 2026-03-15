@@ -1,5 +1,5 @@
 [package]
-name = "iran-vpn-proxy"
+name = "redis_vpn_rust"
 version = "0.1.0"
 edition = "2021"
 

@@ -22,14 +22,14 @@ The client mode runs a SOCKS5 proxy server that clients can connect to:
 
 ```bash
 # Full configuration
-./iran-vpn-proxy client <redis_host> <redis_port> <listen_host> <listen_port>
-./iran-vpn-proxy client localhost 6379 127.0.0.1 1080
+./redis_vpn_rust client <redis_host> <redis_port> <listen_host> <listen_port>
+./redis_vpn_rust client localhost 6379 127.0.0.1 1080
 
 # Redis configuration only (listens on 127.0.0.1:1080 by default)  
-./iran-vpn-proxy client localhost 6379
+./redis_vpn_rust client localhost 6379
 
 # Interactive mode
-./iran-vpn-proxy client
+./redis_vpn_rust client
 ```
 
 ### Server Mode  
@@ -38,11 +38,11 @@ The server mode connects to Redis and handles remote destination connections:
 
 ```bash
 # Command line configuration
-./iran-vpn-proxy server <redis_host> <redis_port>
-./iran-vpn-proxy server localhost 6379
+./redis_vpn_rust server <redis_host> <redis_port>
+./redis_vpn_rust server localhost 6379
 
 # Interactive mode
-./iran-vpn-proxy server
+./redis_vpn_rust server
 ```
 
 ## Example Setup
@@ -54,12 +54,12 @@ The server mode connects to Redis and handles remote destination connections:
 
 2. Start the proxy server (handles remote connections):
    ```bash
-   ./iran-vpn-proxy server localhost 6379
+   ./redis_vpn_rust server localhost 6379
    ```
 
 3. Start the proxy client (accepts SOCKS5 connections):
    ```bash
-   ./iran-vpn-proxy client localhost 6379 127.0.0.1 1080
+   ./redis_vpn_rust client localhost 6379 127.0.0.1 1080
    ```
 
 4. Configure your application to use SOCKS5 proxy at `127.0.0.1:1080`
