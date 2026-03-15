@@ -106,6 +106,9 @@ jobs:
       - name: Upload release assets
         uses: softprops/action-gh-release@v1
         with:
+          tag_name: build-${{ github.sha }}
+          name: "Build ${{ github.run_number }}"
+          prerelease: ${{ github.event_name != 'release' }}
           files: |
             redis_vpn_rust-*/redis_vpn_rust-*
         env:
