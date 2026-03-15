@@ -1,0 +1,162 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  release:
+    types: [ published ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test Suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        
+      - name: Run tests
+        run: cargo test --verbose
+
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+          
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        
+      - name: Clippy check
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary-name: iran-vpn-proxy
+            archive-name: iran-vpn-proxy-linux-amd64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary-name: iran-vpn-proxy.exe
+            archive-name: iran-vpn-proxy-windows-amd64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            binary-name: iran-vpn-proxy
+            archive-name: iran-vpn-proxy-macos-amd64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary-name: iran-vpn-proxy
+            archive-name: iran-vpn-proxy-macos-arm64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build binary
+        run: cargo build --verbose --release --target ${{ matrix.target }}
+
+      - name: Strip binary (Unix)
+        if: matrix.os != 'windows-latest'
+        run: strip target/${{ matrix.target }}/release/${{ matrix.binary-name }}
+
+      - name: Create archive directory
+        run: mkdir -p dist
+
+      - name: Copy binary to archive directory (Unix)
+        if: matrix.os != 'windows-latest'
+        run: cp target/${{ matrix.target }}/release/${{ matrix.binary-name }} dist/
+
+      - name: Copy binary to archive directory (Windows)
+        if: matrix.os == 'windows-latest'
+        run: copy target\${{ matrix.target }}\release\${{ matrix.binary-name }} dist\
+
+      - name: Copy additional files
+        run: |
+          cp README.md dist/ || true
+          cp LICENSE* dist/ || true
+
+      - name: Create tar archive (Unix)
+        if: matrix.os != 'windows-latest'
+        run: tar -czf ${{ matrix.archive-name }}.tar.gz -C dist .
+
+      - name: Create zip archive (Windows)
+        if: matrix.os == 'windows-latest'
+        run: Compress-Archive -Path dist\* -DestinationPath ${{ matrix.archive-name }}.zip
+
+      - name: Upload build artifact (Unix)
+        if: matrix.os != 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive-name }}
+          path: ${{ matrix.archive-name }}.tar.gz
+
+      - name: Upload build artifact (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive-name }}
+          path: ${{ matrix.archive-name }}.zip
+
+  release:
+    name: Release
+    needs: [test, fmt, clippy, build]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release'
+    
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            iran-vpn-proxy-*/iran-vpn-proxy-*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
