@@ -1,4 +1,0 @@
-   0.073728700s  INFO prepare_target{force=false package_id=iran-vpn-proxy v0.1.0 (E:\Projects\IranVPN\redis_vpn_rust) target="iran-vpn-proxy"}: cargo::core::compiler::fingerprint: fingerprint dirty for iran-vpn-proxy v0.1.0 (E:\Projects\IranVPN\redis_vpn_rust)/Check { test: true }/TargetInner { name: "iran-vpn-proxy", doc: true, ..: with_path("E:\\Projects\\IranVPN\\redis_vpn_rust\\src\\main.rs", Edition2021) }
-   0.073783900s  INFO prepare_target{force=false package_id=iran-vpn-proxy v0.1.0 (E:\Projects\IranVPN\redis_vpn_rust) target="iran-vpn-proxy"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(Stale)
-    Checking iran-vpn-proxy v0.1.0 (E:\Projects\IranVPN\redis_vpn_rust)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.93s
