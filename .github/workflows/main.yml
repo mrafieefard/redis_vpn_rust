@@ -97,7 +97,6 @@ jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
-    if: github.event_name == 'release'
     
     steps:
       - name: Download all artifacts
