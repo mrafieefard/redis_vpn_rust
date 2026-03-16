@@ -1451,7 +1451,7 @@ fn print_usage(program_name: &str) {
     eprintln!("Usage:");
     eprintln!("  {} [--log-level LEVEL] client [redis_host] [redis_port] [listen_host] [listen_port] [instance_id]", program_name);
     eprintln!("  {} [--log-level LEVEL] client [redis_host] [redis_port] [instance_id]", program_name);
-    eprintln!("  {} [--log-level LEVEL] server [redis_host] [redis_port]", program_name);
+    eprintln!("  {} [--log-level LEVEL] server [redis_host] [redis_port] [instance_id]", program_name);
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --log-level LEVEL, -l LEVEL   Set logging level (DEBUG, INFO, WARN, ERROR) [default: INFO]");
@@ -1460,6 +1460,7 @@ fn print_usage(program_name: &str) {
     eprintln!("  {} --log-level DEBUG client localhost 6379 127.0.0.1 1080 abc123-def456", program_name);
     eprintln!("  {} -l WARN client localhost 6379 abc123-def456", program_name);
     eprintln!("  {} --log-level ERROR server localhost 6379", program_name);
+    eprintln!("  {} server localhost 6379 my-custom-server-id", program_name);
     eprintln!("  {} client   # Interactive mode for client", program_name);
     eprintln!("  {} server   # Interactive mode for server", program_name);
     eprintln!();
@@ -1467,7 +1468,7 @@ fn print_usage(program_name: &str) {
     eprintln!("  client - Run as SOCKS5 proxy client (listens for client connections)");
     eprintln!("  server - Run as SOCKS5 proxy server (connects to remote destinations)");
     eprintln!();
-    eprintln!("Note: The server will generate and display an instance ID when started.");
+    eprintln!("Note: If no instance ID is provided for server mode, a random UUID will be generated.");
     eprintln!("      Clients must use this instance ID to connect to the correct server.");;
 }
 
@@ -1573,8 +1574,23 @@ fn main() -> io::Result<()> {
             run_client(redis_url, &listen_host, listen_port, instance_id)
         },
         "server" => {
-            let (redis_host, redis_port) = if remaining_args.len() >= 4 {
-                // Command line args: program server redis_host redis_port
+            let (redis_host, redis_port, instance_id) = if remaining_args.len() >= 5 {
+                // Command line args with instance ID: program server redis_host redis_port instance_id
+                let redis_host = remaining_args[2].clone();
+                let redis_port = match remaining_args[3].parse::<u16>() {
+                    Ok(p) => p,
+                    Err(_) => {
+                        error!("Invalid Redis port number '{}'", remaining_args[3]);
+                        print_usage(&args[0]);
+                        std::process::exit(1);
+                    }
+                };
+                let instance_id = remaining_args[4].clone();
+                
+                info!("Server mode - Redis: {}:{}, Instance ID: {}", redis_host, redis_port, instance_id);
+                (redis_host, redis_port, instance_id)
+            } else if remaining_args.len() >= 4 {
+                // Command line args without instance ID: program server redis_host redis_port
                 let redis_host = remaining_args[2].clone();
                 let redis_port = match remaining_args[3].parse::<u16>() {
                     Ok(p) => p,
@@ -1585,16 +1601,19 @@ fn main() -> io::Result<()> {
                     }
                 };
                 
-                info!("Server mode - Redis: {}:{}", redis_host, redis_port);
-                (redis_host, redis_port)
+                // Generate a unique instance ID for this server
+                let instance_id = Uuid::new_v4().to_string();
+                info!("Server mode - Redis: {}:{}, Generated instance ID: {}", redis_host, redis_port, instance_id);
+                (redis_host, redis_port, instance_id)
             } else {
                 // Interactive mode
                 info!("Server mode - Interactive configuration");
-                ask_redis_config()?
+                let (redis_host, redis_port) = ask_redis_config()?;
+                let instance_id = Uuid::new_v4().to_string();
+                info!("Generated instance ID: {}", instance_id);
+                (redis_host, redis_port, instance_id)
             };
             
-            // Generate a unique instance ID for this server
-            let instance_id = Uuid::new_v4().to_string();
             let redis_url = format!("redis://{}:{}/", redis_host, redis_port);
             run_server(redis_url, instance_id)
         },
