@@ -1,4 +1,5 @@
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use log::{debug, info, warn, error};
 use redis::Commands;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -1429,16 +1430,36 @@ fn run_server(redis_url: String, instance_id: String) -> io::Result<()> {
     Ok(())
 }
 
+fn parse_log_level(level_str: &str) -> Option<log::LevelFilter> {
+    match level_str.to_uppercase().as_str() {
+        "DEBUG" => Some(log::LevelFilter::Debug),
+        "INFO" => Some(log::LevelFilter::Info),
+        "WARN" | "WARNING" => Some(log::LevelFilter::Warn),
+        "ERROR" => Some(log::LevelFilter::Error),
+        _ => None,
+    }
+}
+
+fn init_logger(level: log::LevelFilter) {
+    env_logger::Builder::new()
+        .filter_level(level)
+        .format_timestamp_secs()
+        .init();
+}
+
 fn print_usage(program_name: &str) {
     eprintln!("Usage:");
-    eprintln!("  {} client [redis_host] [redis_port] [listen_host] [listen_port] [instance_id]", program_name);
-    eprintln!("  {} client [redis_host] [redis_port] [instance_id]", program_name);
-    eprintln!("  {} server [redis_host] [redis_port]", program_name);
+    eprintln!("  {} [--log-level LEVEL] client [redis_host] [redis_port] [listen_host] [listen_port] [instance_id]", program_name);
+    eprintln!("  {} [--log-level LEVEL] client [redis_host] [redis_port] [instance_id]", program_name);
+    eprintln!("  {} [--log-level LEVEL] server [redis_host] [redis_port]", program_name);
+    eprintln!();
+    eprintln!("Options:");
+    eprintln!("  --log-level LEVEL, -l LEVEL   Set logging level (DEBUG, INFO, WARN, ERROR) [default: INFO]");
     eprintln!();
     eprintln!("Examples:");
-    eprintln!("  {} client localhost 6379 127.0.0.1 1080 abc123-def456", program_name);
-    eprintln!("  {} client localhost 6379 abc123-def456", program_name);
-    eprintln!("  {} server localhost 6379", program_name);
+    eprintln!("  {} --log-level DEBUG client localhost 6379 127.0.0.1 1080 abc123-def456", program_name);
+    eprintln!("  {} -l WARN client localhost 6379 abc123-def456", program_name);
+    eprintln!("  {} --log-level ERROR server localhost 6379", program_name);
     eprintln!("  {} client   # Interactive mode for client", program_name);
     eprintln!("  {} server   # Interactive mode for server", program_name);
     eprintln!();
@@ -1447,66 +1468,104 @@ fn print_usage(program_name: &str) {
     eprintln!("  server - Run as SOCKS5 proxy server (connects to remote destinations)");
     eprintln!();
     eprintln!("Note: The server will generate and display an instance ID when started.");
-    eprintln!("      Clients must use this instance ID to connect to the correct server.");
+    eprintln!("      Clients must use this instance ID to connect to the correct server.");;
 }
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     
-    if args.len() < 2 {
+    // Parse log level argument
+    let mut log_level = log::LevelFilter::Info; // Default to INFO
+    let mut remaining_args = args.clone();
+    let mut i = 1;
+    
+    while i < remaining_args.len() {
+        match remaining_args[i].as_str() {
+            "--log-level" | "-l" => {
+                if i + 1 < remaining_args.len() {
+                    match parse_log_level(&remaining_args[i + 1]) {
+                        Some(level) => {
+                            log_level = level;
+                            remaining_args.remove(i + 1); // Remove log level value
+                            remaining_args.remove(i); // Remove --log-level flag
+                            continue; // Don't increment i since we removed items
+                        }
+                        None => {
+                            eprintln!("Error: Invalid log level '{}'. Must be DEBUG, INFO, WARN, or ERROR.", remaining_args[i + 1]);
+                            print_usage(&args[0]);
+                            std::process::exit(1);
+                        }
+                    }
+                } else {
+                    eprintln!("Error: --log-level requires a value");
+                    print_usage(&args[0]);
+                    std::process::exit(1);
+                }
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+    
+    // Initialize logger
+    init_logger(log_level);
+    info!("Starting application with log level: {}", log_level);
+    
+    if remaining_args.len() < 2 {
         print_usage(&args[0]);
         std::process::exit(1);
     }
 
-    let mode = &args[1];
+    let mode = &remaining_args[1];
     
     match mode.as_str() {
         "client" => {
-            let (redis_host, redis_port, listen_host, listen_port, instance_id) = if args.len() >= 7 {
+            let (redis_host, redis_port, listen_host, listen_port, instance_id) = if remaining_args.len() >= 7 {
                 // Full arguments: program client redis_host redis_port listen_host listen_port instance_id
-                let redis_host = args[2].clone();
-                let redis_port = match args[3].parse::<u16>() {
+                let redis_host = remaining_args[2].clone();
+                let redis_port = match remaining_args[3].parse::<u16>() {
                     Ok(p) => p,
                     Err(_) => {
-                        eprintln!("Error: Invalid Redis port number '{}'", args[3]);
+                        error!("Invalid Redis port number '{}'", remaining_args[3]);
                         print_usage(&args[0]);
                         std::process::exit(1);
                     }
                 };
-                let listen_host = args[4].clone();
-                let listen_port = match args[5].parse::<u16>() {
+                let listen_host = remaining_args[4].clone();
+                let listen_port = match remaining_args[5].parse::<u16>() {
                     Ok(p) => p,
                     Err(_) => {
-                        eprintln!("Error: Invalid listen port number '{}'", args[5]);
+                        error!("Invalid listen port number '{}'", remaining_args[5]);
                         print_usage(&args[0]);
                         std::process::exit(1);
                     }
                 };
-                let instance_id = args[6].clone();
+                let instance_id = remaining_args[6].clone();
                 
-                println!("Client mode - Redis: {}:{}, Listen: {}:{}, Instance: {}", redis_host, redis_port, listen_host, listen_port, instance_id);
+                info!("Client mode - Redis: {}:{}, Listen: {}:{}, Instance: {}", redis_host, redis_port, listen_host, listen_port, instance_id);
                 (redis_host, redis_port, listen_host, listen_port, instance_id)
-            } else if args.len() >= 5 {
+            } else if remaining_args.len() >= 5 {
                 // Redis + instance: program client redis_host redis_port instance_id
-                let redis_host = args[2].clone();
-                let redis_port = match args[3].parse::<u16>() {
+                let redis_host = remaining_args[2].clone();
+                let redis_port = match remaining_args[3].parse::<u16>() {
                     Ok(p) => p,
                     Err(_) => {
-                        eprintln!("Error: Invalid Redis port number '{}'", args[3]);
+                        error!("Invalid Redis port number '{}'", remaining_args[3]);
                         print_usage(&args[0]);
                         std::process::exit(1);
                     }
                 };
-                let instance_id = args[4].clone();
+                let instance_id = remaining_args[4].clone();
                 
-                println!("Client mode - Redis: {}:{}, Listen: 127.0.0.1:1080 (default), Instance: {}", redis_host, redis_port, instance_id);
+                info!("Client mode - Redis: {}:{}, Listen: 127.0.0.1:1080 (default), Instance: {}", redis_host, redis_port, instance_id);
                 (redis_host, redis_port, "127.0.0.1".to_string(), 1080, instance_id)
             } else {
                 // Interactive mode
-                println!("Client mode - Interactive configuration");
+                info!("Client mode - Interactive configuration");
                 let (redis_host, redis_port) = ask_redis_config()?;
                 let instance_id = ask_instance_id()?;
-                println!("SOCKS5 proxy will listen on: 127.0.0.1:1080 (default)");
+                info!("SOCKS5 proxy will listen on: 127.0.0.1:1080 (default)");
                 (redis_host, redis_port, "127.0.0.1".to_string(), 1080, instance_id)
             };
             
@@ -1514,23 +1573,23 @@ fn main() -> io::Result<()> {
             run_client(redis_url, &listen_host, listen_port, instance_id)
         },
         "server" => {
-            let (redis_host, redis_port) = if args.len() >= 4 {
+            let (redis_host, redis_port) = if remaining_args.len() >= 4 {
                 // Command line args: program server redis_host redis_port
-                let redis_host = args[2].clone();
-                let redis_port = match args[3].parse::<u16>() {
+                let redis_host = remaining_args[2].clone();
+                let redis_port = match remaining_args[3].parse::<u16>() {
                     Ok(p) => p,
                     Err(_) => {
-                        eprintln!("Error: Invalid Redis port number '{}'", args[3]);
+                        error!("Invalid Redis port number '{}'", remaining_args[3]);
                         print_usage(&args[0]);
                         std::process::exit(1);
                     }
                 };
                 
-                println!("Server mode - Redis: {}:{}", redis_host, redis_port);
+                info!("Server mode - Redis: {}:{}", redis_host, redis_port);
                 (redis_host, redis_port)
             } else {
                 // Interactive mode
-                println!("Server mode - Interactive configuration");
+                info!("Server mode - Interactive configuration");
                 ask_redis_config()?
             };
             
@@ -1540,7 +1599,7 @@ fn main() -> io::Result<()> {
             run_server(redis_url, instance_id)
         },
         _ => {
-            eprintln!("Error: Invalid mode '{}'. Must be 'client' or 'server'.", mode);
+            error!("Invalid mode '{}'. Must be 'client' or 'server'.", mode);
             print_usage(&args[0]);
             std::process::exit(1);
         }
