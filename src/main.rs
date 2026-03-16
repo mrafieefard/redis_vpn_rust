@@ -14,8 +14,6 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 // Constants
-const CONTROL_REQUEST_STREAM: &str = "socks5:control:requests";
-const CONTROL_RESPONSE_STREAM: &str = "socks5:control:responses";
 const SOCKET_BUFFER: usize = 32768;
 const OPEN_TIMEOUT_SECS: u64 = 15;
 
@@ -55,6 +53,15 @@ fn ask_redis_config() -> io::Result<(String, u16)> {
     };
 
     Ok((host, port))
+}
+
+fn ask_instance_id() -> io::Result<String> {
+    let input = prompt_input("Server instance ID: ")?;
+    if input.is_empty() {
+        Err(io::Error::new(io::ErrorKind::InvalidInput, "instance ID cannot be empty"))
+    } else {
+        Ok(input)
+    }
 }
 
 // Shared data structures
@@ -114,12 +121,14 @@ struct DataMessage {
 // CLIENT CODE
 struct ResponseWaiter {
     responses: Arc<(Mutex<HashMap<String, ControlPayload>>, Condvar)>,
+    instance_id: String,
 }
 
 impl ResponseWaiter {
-    fn new(redis_url: String) -> Self {
+    fn new(redis_url: String, instance_id: String) -> Self {
         let responses = Arc::new((Mutex::new(HashMap::new()), Condvar::new()));
         let responses_clone = Arc::clone(&responses);
+        let instance_id_clone = instance_id.clone();
 
         thread::spawn(move || {
             let client = match redis::Client::open(redis_url.as_str()) {
@@ -138,6 +147,7 @@ impl ResponseWaiter {
                 }
             };
 
+            let control_response_stream = format!("socks5:control:responses:{}", instance_id_clone);
             let mut last_id = "0".to_string();
 
             loop {
@@ -147,7 +157,7 @@ impl ResponseWaiter {
                     .arg("COUNT")
                     .arg(50)
                     .arg("STREAMS")
-                    .arg(CONTROL_RESPONSE_STREAM)
+                    .arg(&control_response_stream)
                     .arg(&last_id)
                     .query(&mut conn);
 
@@ -211,7 +221,7 @@ impl ResponseWaiter {
             }
         });
 
-        Self { responses }
+        Self { responses, instance_id }
     }
 
     fn wait_for(&self, conn_id: &str, timeout: Duration) -> Option<ControlPayload> {
@@ -255,14 +265,16 @@ struct TunnelSession {
     c2s_channel: String,
     s2c_channel: String,
     ctrl_channel: String,
+    instance_id: String,
 }
 
 impl TunnelSession {
     fn new(client_sock: TcpStream, client_addr: SocketAddr, redis_url: String, waiter: Arc<ResponseWaiter>) -> Self {
         let conn_id = Uuid::new_v4().to_string();
-        let c2s_channel = format!("socks5:data:c2s:{conn_id}");
-        let s2c_channel = format!("socks5:data:s2c:{conn_id}");
-        let ctrl_channel = format!("socks5:ctrl:{conn_id}");
+        let instance_id = waiter.instance_id.clone();
+        let c2s_channel = format!("socks5:data:c2s:{}:{}", instance_id, conn_id);
+        let s2c_channel = format!("socks5:data:s2c:{}:{}", instance_id, conn_id);
+        let ctrl_channel = format!("socks5:ctrl:{}:{}", instance_id, conn_id);
 
         Self {
             client_sock,
@@ -274,6 +286,7 @@ impl TunnelSession {
             c2s_channel,
             s2c_channel,
             ctrl_channel,
+            instance_id,
         }
     }
 
@@ -293,8 +306,9 @@ impl TunnelSession {
                     serde_json::json!({ "type": "close" }).to_string(),
                 );
 
+                let control_request_stream = format!("socks5:control:requests:{}", self.instance_id);
                 let _ : redis::RedisResult<String> = redis::cmd("XADD")
-                    .arg(CONTROL_REQUEST_STREAM)
+                    .arg(control_request_stream)
                     .arg("*")
                     .arg("data")
                     .arg(
@@ -428,9 +442,10 @@ impl TunnelSession {
             "port": port,
         });
 
+        let control_request_stream = format!("socks5:control:requests:{}", self.instance_id);
         eprintln!("[DEBUG] Sending control request: {}", payload.to_string());
         let _id: String = redis::cmd("XADD")
-            .arg(CONTROL_REQUEST_STREAM)
+            .arg(control_request_stream)
             .arg("*")
             .arg("data")
             .arg(payload.to_string())
@@ -667,14 +682,16 @@ impl TunnelSession {
             c2s_channel: self.c2s_channel.clone(),
             s2c_channel: self.s2c_channel.clone(),
             ctrl_channel: self.ctrl_channel.clone(),
+            instance_id: self.instance_id.clone(),
         }
     }
 }
 
-fn run_client(redis_url: String, listen_host: &str, listen_port: u16) -> io::Result<()> {
-    let waiter = Arc::new(ResponseWaiter::new(redis_url.clone()));
+fn run_client(redis_url: String, listen_host: &str, listen_port: u16, instance_id: String) -> io::Result<()> {
+    let waiter = Arc::new(ResponseWaiter::new(redis_url.clone(), instance_id.clone()));
     let listener = TcpListener::bind((listen_host, listen_port))?;
     println!("SOCKS5 Redis client proxy listening on {}:{}", listen_host, listen_port);
+    println!("Connected to server instance: {}", instance_id);
 
     for stream in listener.incoming() {
         match stream {
@@ -717,20 +734,22 @@ struct Tunnel {
     c2s_channel: String,
     s2c_channel: String,
     ctrl_channel: String,
+    instance_id: String,
 }
 
 impl Tunnel {
-    fn new(conn_id: String, remote_host: String, remote_port: u16, redis_url: String) -> Self {
+    fn new(conn_id: String, remote_host: String, remote_port: u16, redis_url: String, instance_id: String) -> Self {
         Self {
-            c2s_channel: format!("socks5:data:c2s:{conn_id}"),
-            s2c_channel: format!("socks5:data:s2c:{conn_id}"),
-            ctrl_channel: format!("socks5:ctrl:{conn_id}"),
+            c2s_channel: format!("socks5:data:c2s:{}:{}", instance_id, conn_id),
+            s2c_channel: format!("socks5:data:s2c:{}:{}", instance_id, conn_id),
+            ctrl_channel: format!("socks5:ctrl:{}:{}", instance_id, conn_id),
             conn_id,
             remote_host,
             remote_port,
             redis_url,
             closed: Arc::new(AtomicBool::new(false)),
             remote_sock: Arc::new(Mutex::new(None)),
+            instance_id,
         }
     }
 
@@ -1142,40 +1161,46 @@ impl Tunnel {
 struct Server {
     redis_url: String,
     tunnels: Arc<Mutex<HashMap<String, Tunnel>>>,
+    instance_id: String,
 }
 
 impl Server {
-    fn new(redis_url: String) -> Self {
+    fn new(redis_url: String, instance_id: String) -> Self {
         Self {
             redis_url,
             tunnels: Arc::new(Mutex::new(HashMap::new())),
+            instance_id,
         }
     }
 
     fn clear_redis_state(&self) -> Result<(), Box<dyn std::error::Error>> {
-        println!("[DEBUG] Clearing Redis state...");
+        println!("[DEBUG] Clearing Redis state for instance {}...", self.instance_id);
         let client = redis::Client::open(self.redis_url.as_str())?;
         let mut conn = client.get_connection()?;
 
-        // Clear control streams
-        println!("[DEBUG] Clearing control request stream: {}", CONTROL_REQUEST_STREAM);
+        let control_request_stream = format!("socks5:control:requests:{}", self.instance_id);
+        let control_response_stream = format!("socks5:control:responses:{}", self.instance_id);
+
+        // Clear control streams for this instance
+        println!("[DEBUG] Clearing control request stream: {}", control_request_stream);
         let _: redis::RedisResult<i32> = redis::cmd("DEL")
-            .arg(CONTROL_REQUEST_STREAM)
+            .arg(&control_request_stream)
             .query(&mut conn);
 
-        println!("[DEBUG] Clearing control response stream: {}", CONTROL_RESPONSE_STREAM);
+        println!("[DEBUG] Clearing control response stream: {}", control_response_stream);
         let _: redis::RedisResult<i32> = redis::cmd("DEL")
-            .arg(CONTROL_RESPONSE_STREAM)
+            .arg(&control_response_stream)
             .query(&mut conn);
 
-        // Clear any existing socks5 related keys
+        // Clear any existing socks5 related keys for this instance
+        let pattern = format!("socks5:*:{}:*", self.instance_id);
         let keys: Vec<String> = redis::cmd("KEYS")
-            .arg("socks5:*")
+            .arg(&pattern)
             .query(&mut conn)
             .unwrap_or_default();
         
         if !keys.is_empty() {
-            println!("[DEBUG] Clearing {} existing socks5 keys", keys.len());
+            println!("[DEBUG] Clearing {} existing socks5 keys for instance {}", keys.len(), self.instance_id);
             for key in &keys {
                 println!("[DEBUG] Deleting key: {}", key);
             }
@@ -1184,7 +1209,7 @@ impl Server {
                 .query(&mut conn);
         }
 
-        println!("[DEBUG] Redis state cleared successfully");
+        println!("[DEBUG] Redis state cleared successfully for instance {}", self.instance_id);
         Ok(())
     }
 
@@ -1214,7 +1239,7 @@ impl Server {
         };
 
         let result: redis::RedisResult<String> = redis::cmd("XADD")
-            .arg(CONTROL_RESPONSE_STREAM)
+            .arg(format!("socks5:control:responses:{}", self.instance_id))
             .arg("*")
             .arg("data")
             .arg(data)
@@ -1232,6 +1257,7 @@ impl Server {
             req.host.clone(),
             req.port,
             self.redis_url.clone(),
+            self.instance_id.clone(),
         );
 
         match tunnel.start() {
@@ -1304,18 +1330,20 @@ impl Server {
             }
         };
 
+        let control_request_stream = format!("socks5:control:requests:{}", self.instance_id);
         let mut last_id = "0".to_string();
-        println!("SOCKS5 Redis server started");
+        println!("SOCKS5 Redis server started with instance ID: {}", self.instance_id);
+        println!("Clients should use this instance ID to connect: {}", self.instance_id);
 
         loop {
-            println!("[DEBUG] Waiting for new packets from Redis stream: {}", CONTROL_REQUEST_STREAM);
+            println!("[DEBUG] Waiting for new packets from Redis stream: {}", control_request_stream);
             let reply: redis::RedisResult<redis::streams::StreamReadReply> = redis::cmd("XREAD")
                 .arg("BLOCK")
                 .arg(5000)
                 .arg("COUNT")
                 .arg(20)
                 .arg("STREAMS")
-                .arg(CONTROL_REQUEST_STREAM)
+                .arg(&control_request_stream)
                 .arg(&last_id)
                 .query(&mut conn);
 
@@ -1395,19 +1423,21 @@ impl Server {
     }
 }
 
-fn run_server(redis_url: String) -> io::Result<()> {
-    let server = Server::new(redis_url);
+fn run_server(redis_url: String, instance_id: String) -> io::Result<()> {
+    let server = Server::new(redis_url, instance_id);
     server.run();
     Ok(())
 }
 
 fn print_usage(program_name: &str) {
     eprintln!("Usage:");
-    eprintln!("  {} client [redis_host] [redis_port] [listen_host] [listen_port]", program_name);
+    eprintln!("  {} client [redis_host] [redis_port] [listen_host] [listen_port] [instance_id]", program_name);
+    eprintln!("  {} client [redis_host] [redis_port] [instance_id]", program_name);
     eprintln!("  {} server [redis_host] [redis_port]", program_name);
     eprintln!();
     eprintln!("Examples:");
-    eprintln!("  {} client localhost 6379 127.0.0.1 1080", program_name);
+    eprintln!("  {} client localhost 6379 127.0.0.1 1080 abc123-def456", program_name);
+    eprintln!("  {} client localhost 6379 abc123-def456", program_name);
     eprintln!("  {} server localhost 6379", program_name);
     eprintln!("  {} client   # Interactive mode for client", program_name);
     eprintln!("  {} server   # Interactive mode for server", program_name);
@@ -1415,6 +1445,9 @@ fn print_usage(program_name: &str) {
     eprintln!("Modes:");
     eprintln!("  client - Run as SOCKS5 proxy client (listens for client connections)");
     eprintln!("  server - Run as SOCKS5 proxy server (connects to remote destinations)");
+    eprintln!();
+    eprintln!("Note: The server will generate and display an instance ID when started.");
+    eprintln!("      Clients must use this instance ID to connect to the correct server.");
 }
 
 fn main() -> io::Result<()> {
@@ -1429,8 +1462,8 @@ fn main() -> io::Result<()> {
     
     match mode.as_str() {
         "client" => {
-            let (redis_host, redis_port, listen_host, listen_port) = if args.len() >= 6 {
-                // Full arguments: program client redis_host redis_port listen_host listen_port
+            let (redis_host, redis_port, listen_host, listen_port, instance_id) = if args.len() >= 7 {
+                // Full arguments: program client redis_host redis_port listen_host listen_port instance_id
                 let redis_host = args[2].clone();
                 let redis_port = match args[3].parse::<u16>() {
                     Ok(p) => p,
@@ -1449,11 +1482,12 @@ fn main() -> io::Result<()> {
                         std::process::exit(1);
                     }
                 };
+                let instance_id = args[6].clone();
                 
-                println!("Client mode - Redis: {}:{}, Listen: {}:{}", redis_host, redis_port, listen_host, listen_port);
-                (redis_host, redis_port, listen_host, listen_port)
-            } else if args.len() >= 4 {
-                // Redis args only: program client redis_host redis_port
+                println!("Client mode - Redis: {}:{}, Listen: {}:{}, Instance: {}", redis_host, redis_port, listen_host, listen_port, instance_id);
+                (redis_host, redis_port, listen_host, listen_port, instance_id)
+            } else if args.len() >= 5 {
+                // Redis + instance: program client redis_host redis_port instance_id
                 let redis_host = args[2].clone();
                 let redis_port = match args[3].parse::<u16>() {
                     Ok(p) => p,
@@ -1463,19 +1497,21 @@ fn main() -> io::Result<()> {
                         std::process::exit(1);
                     }
                 };
+                let instance_id = args[4].clone();
                 
-                println!("Client mode - Redis: {}:{}, Listen: 127.0.0.1:1080 (default)", redis_host, redis_port);
-                (redis_host, redis_port, "127.0.0.1".to_string(), 1080)
+                println!("Client mode - Redis: {}:{}, Listen: 127.0.0.1:1080 (default), Instance: {}", redis_host, redis_port, instance_id);
+                (redis_host, redis_port, "127.0.0.1".to_string(), 1080, instance_id)
             } else {
                 // Interactive mode
                 println!("Client mode - Interactive configuration");
                 let (redis_host, redis_port) = ask_redis_config()?;
+                let instance_id = ask_instance_id()?;
                 println!("SOCKS5 proxy will listen on: 127.0.0.1:1080 (default)");
-                (redis_host, redis_port, "127.0.0.1".to_string(), 1080)
+                (redis_host, redis_port, "127.0.0.1".to_string(), 1080, instance_id)
             };
             
             let redis_url = format!("redis://{}:{}/", redis_host, redis_port);
-            run_client(redis_url, &listen_host, listen_port)
+            run_client(redis_url, &listen_host, listen_port, instance_id)
         },
         "server" => {
             let (redis_host, redis_port) = if args.len() >= 4 {
@@ -1498,8 +1534,10 @@ fn main() -> io::Result<()> {
                 ask_redis_config()?
             };
             
+            // Generate a unique instance ID for this server
+            let instance_id = Uuid::new_v4().to_string();
             let redis_url = format!("redis://{}:{}/", redis_host, redis_port);
-            run_server(redis_url)
+            run_server(redis_url, instance_id)
         },
         _ => {
             eprintln!("Error: Invalid mode '{}'. Must be 'client' or 'server'.", mode);
